@@ -1,13 +1,22 @@
 package biz.bokhorst.xprivacy;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
-import de.robv.android.xposed.XC_MethodHook.MethodHookParam;
+import android.accounts.Account;
+import android.util.Log;
 
 public class XGoogleAuthUtil extends XHook {
+	private Methods mMethod;
 
-	public XGoogleAuthUtil(String methodName, String restrictionName, String[] permissions, String specifier) {
-		super(methodName, restrictionName, permissions, specifier);
+	private XGoogleAuthUtil(Methods method, String restrictionName, String specifier) {
+		super(restrictionName, method.name(), specifier);
+		mMethod = method;
+	}
+
+	public String getClassName() {
+		return "com.google.android.gms.auth.GoogleAuthUtil";
 	}
 
 	// @formatter:off
@@ -21,14 +30,37 @@ public class XGoogleAuthUtil extends XHook {
 
 	// @formatter:on
 
-	@Override
-	protected void before(MethodHookParam param) throws Throwable {
-		if (isRestricted(param))
-			param.setThrowable(new IOException());
+	private enum Methods {
+		getToken, getTokenWithNotification
+	};
+
+	public static List<XHook> getInstances() {
+		List<XHook> listHook = new ArrayList<XHook>();
+		listHook.add(new XGoogleAuthUtil(Methods.getToken, PrivacyManager.cAccounts, "getTokenGoogle"));
+		listHook.add(new XGoogleAuthUtil(Methods.getTokenWithNotification, PrivacyManager.cAccounts,
+				"getTokenWithNotificationGoogle"));
+		return listHook;
 	}
 
 	@Override
-	protected void after(MethodHookParam param) throws Throwable {
+	protected void before(XParam param) throws Throwable {
 		// Do nothing
+	}
+
+	@Override
+	protected void after(XParam param) throws Throwable {
+		if (mMethod == Methods.getToken || mMethod == Methods.getTokenWithNotification) {
+			if (param.args.length > 1) {
+				String accountName = null;
+				if (param.args[1] instanceof String)
+					accountName = (String) param.args[1];
+				else if (param.args[1] instanceof Account)
+					accountName = ((Account) param.args[1]).type;
+				if (param.getResult() != null && isRestrictedExtra(param, accountName))
+					param.setThrowable(new IOException("XPrivacy"));
+			}
+
+		} else
+			Util.log(this, Log.WARN, "Unknown method=" + param.method.getName());
 	}
 }

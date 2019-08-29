@@ -1,18 +1,31 @@
 package biz.bokhorst.xprivacy;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
 import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.net.Uri;
-import android.util.Log;
-
-import de.robv.android.xposed.XC_MethodHook.MethodHookParam;
+import android.provider.MediaStore;
 
 public class XActivity extends XHook {
-
+	private Methods mMethod;
 	private String mActionName;
+
+	private XActivity(Methods method, String restrictionName, String actionName) {
+		super(restrictionName, method.name(), actionName);
+		mMethod = method;
+		mActionName = actionName;
+	}
+
+	public String getClassName() {
+		return "android.app.Activity";
+	}
 
 	// @formatter:off
 
+	// public Object getSystemService(String name)
 	// public void startActivities(Intent[] intents)
 	// public void startActivities(Intent[] intents, Bundle options)
 	// public void startActivity(Intent intent)
@@ -25,33 +38,76 @@ public class XActivity extends XHook {
 	// public void startActivityFromFragment(Fragment fragment, Intent intent, int requestCode, Bundle options)
 	// public boolean startActivityIfNeeded(Intent intent, int requestCode)
 	// public boolean startActivityIfNeeded(Intent intent, int requestCode, Bundle options)
+	// public boolean startNextMatchingActivity(Intent intent)
+	// public boolean startNextMatchingActivity(Intent intent, Bundle options)
 	// frameworks/base/core/java/android/app/Activity.java
 
 	// @formatter:on
 
-	public XActivity(String methodName, String restrictionName, String[] permissions, String actionName) {
-		super(methodName, restrictionName, permissions, actionName);
-		mActionName = actionName;
+	// @formatter:off
+	private enum Methods {
+		getSystemService,
+		startActivities, startActivity, startActivityForResult, startActivityFromChild, startActivityFromFragment, startActivityIfNeeded, startNextMatchingActivity
+	};
+	// @formatter:on
+
+	@SuppressLint("InlinedApi")
+	public static List<XHook> getInstances() {
+		List<XHook> listHook = new ArrayList<XHook>();
+		listHook.add(new XActivity(Methods.getSystemService, null, null));
+
+		List<Methods> startMethods = new ArrayList<Methods>(Arrays.asList(Methods.values()));
+		startMethods.remove(Methods.getSystemService);
+
+		// Intent send: browser
+		for (Methods activity : startMethods)
+			listHook.add(new XActivity(activity, PrivacyManager.cView, Intent.ACTION_VIEW));
+
+		// Intent send: call/dial
+		for (Methods activity : startMethods) {
+			listHook.add(new XActivity(activity, PrivacyManager.cCalling, Intent.ACTION_CALL));
+			listHook.add(new XActivity(activity, PrivacyManager.cCalling, Intent.ACTION_DIAL));
+		}
+
+		// Intent send: media
+		for (Methods activity : startMethods) {
+			listHook.add(new XActivity(activity, PrivacyManager.cMedia, MediaStore.ACTION_IMAGE_CAPTURE));
+			listHook.add(new XActivity(activity, PrivacyManager.cMedia, MediaStore.ACTION_IMAGE_CAPTURE_SECURE));
+			listHook.add(new XActivity(activity, PrivacyManager.cMedia, MediaStore.ACTION_VIDEO_CAPTURE));
+		}
+
+		return listHook;
 	}
 
 	@Override
 	@SuppressLint("DefaultLocale")
-	protected void before(MethodHookParam param) throws Throwable {
+	protected void before(XParam param) throws Throwable {
 		// Get intent(s)
 		Intent[] intents = null;
-		String methodName = param.method.getName();
-		if (methodName.equals("startActivity") || methodName.equals("startActivityForResult")
-				|| methodName.equals("startActivityIfNeeded")) {
-			if (param.args.length > 0 && param.args[0] != null)
+		switch (mMethod) {
+		case getSystemService:
+			// Do nothing
+			break;
+
+		case startActivity:
+		case startActivityForResult:
+		case startActivityIfNeeded:
+		case startNextMatchingActivity:
+			if (param.args.length > 0 && param.args[0] instanceof Intent)
 				intents = new Intent[] { (Intent) param.args[0] };
-		} else if (methodName.equals("startActivityFromChild") || methodName.equals("startActivityFromFragment")) {
-			if (param.args.length > 1 && param.args[1] != null)
+			break;
+
+		case startActivityFromChild:
+		case startActivityFromFragment:
+			if (param.args.length > 1 && param.args[1] instanceof Intent)
 				intents = new Intent[] { (Intent) param.args[1] };
-		} else if (methodName.equals("startActivities")) {
-			if (param.args.length > 0 && param.args[0] != null)
+			break;
+
+		case startActivities:
+			if (param.args.length > 0 && param.args[0] instanceof Intent[])
 				intents = (Intent[]) param.args[0];
-		} else
-			Util.log(this, Log.WARN, "Unknown method=" + methodName);
+			break;
+		}
 
 		// Process intent(s)
 		if (intents != null)
@@ -60,31 +116,29 @@ public class XActivity extends XHook {
 					boolean restricted = false;
 					if (mActionName.equals(Intent.ACTION_VIEW)) {
 						Uri uri = intent.getData();
-						if (uri != null) {
-							String scheme = uri.getScheme();
-							if (scheme != null) {
-								scheme = scheme.toLowerCase();
-								if (scheme.equals("http") || scheme.equals("https"))
-									if (isRestricted(param, mActionName))
-										restricted = true;
-							}
-						}
+						if (uri != null)
+							if (isRestrictedExtra(param, mActionName, uri.toString()))
+								restricted = true;
 					} else
 						restricted = isRestricted(param, mActionName);
 
 					if (restricted) {
-						if (methodName.equals("startActivityIfNeeded"))
+						if (mMethod == Methods.startActivityIfNeeded)
 							param.setResult(true);
 						else
 							param.setResult(null);
-						notifyUser(mActionName);
 						return;
 					}
 				}
 	}
 
 	@Override
-	protected void after(MethodHookParam param) throws Throwable {
-		// Do nothing
+	protected void after(XParam param) throws Throwable {
+		if (mMethod == Methods.getSystemService)
+			if (param.args.length > 0 && param.args[0] instanceof String && param.getResult() != null) {
+				String name = (String) param.args[0];
+				Object instance = param.getResult();
+				XPrivacy.handleGetSystemService(name, instance.getClass().getName(), getSecret());
+			}
 	}
 }

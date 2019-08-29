@@ -18,3 +18,15 @@
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {
 #   public *;
 #}
+
+#Line numbers
+-renamesourcefileattribute SourceFile
+-keepattributes SourceFile,LineNumberTable
+
+#Xposed
+-libraryjars XposedBridgeApi-20150213.jar
+
+#XPrivacy
+-keep class biz.bokhorst.xprivacy.XPrivacy {*; }
+-keepnames class biz.bokhorst.xprivacy.X* { }
+-keepclassmembers class biz.bokhorst.xprivacy.Util { public static boolean isXposedEnabled(); }

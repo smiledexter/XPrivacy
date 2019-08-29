@@ -1,19 +1,17 @@
 package biz.bokhorst.xprivacy;
 
+// Based on:
 // https://github.com/rovo89/XposedBridge/blob/master/src/de/robv/android/xposed/XSharedPreferences.java
 
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
-import org.xmlpull.v1.XmlPullParserException;
-
 import android.content.SharedPreferences;
-import android.os.Environment;
+import android.os.Process;
 import android.util.Log;
 
 import com.android.internal.util.XmlUtils;
@@ -24,25 +22,26 @@ import com.android.internal.util.XmlUtils;
  * with all ROMs.
  */
 public final class SharedPreferencesEx implements SharedPreferences {
-	private static final String TAG = "ReadOnlySharedPreferences";
 	private final File mFile;
+	private final File mBackupFile;
 	private Map<String, Object> mMap;
 	private boolean mLoaded = false;
 	private long mLastModified;
 	private long mFileSize;
 
+	private static int cTryMaxCount = 10;
+	private static int cTryWaitMs = 50;
+
 	public SharedPreferencesEx(File prefFile) {
 		mFile = prefFile;
+		mBackupFile = makeBackupFile(prefFile);
 		startLoadFromDisk();
 	}
 
-	public SharedPreferencesEx(String packageName) {
-		this(packageName, packageName + "_preferences");
-	}
-
 	public SharedPreferencesEx(String packageName, String prefFileName) {
-		mFile = new File(Environment.getDataDirectory(), "data/" + packageName + "/shared_prefs/" + prefFileName
-				+ ".xml");
+		mFile = new File(Util.getUserDataDirectory(Process.myUid()) + File.pathSeparator + "shared_prefs"
+				+ File.pathSeparator + prefFileName + ".xml");
+		mBackupFile = makeBackupFile(mFile);
 		startLoadFromDisk();
 	}
 
@@ -50,7 +49,7 @@ public final class SharedPreferencesEx implements SharedPreferences {
 		synchronized (this) {
 			mLoaded = false;
 		}
-		new Thread("XSharedPreferences-load") {
+		new Thread("SharedPreferencesEx-load") {
 			@Override
 			public void run() {
 				synchronized (SharedPreferencesEx.this) {
@@ -62,45 +61,67 @@ public final class SharedPreferencesEx implements SharedPreferences {
 
 	@SuppressWarnings({ "rawtypes", "unchecked" })
 	private void loadFromDiskLocked() {
-		if (mLoaded) {
-			return;
-		}
+		int tries = 0;
+		while (++tries <= cTryMaxCount && !mLoaded && (mFile.exists() || mBackupFile.exists())) {
+			// Log retry
+			if (tries > 1)
+				Util.log(null, Log.WARN, "Load " + mFile + " try=" + tries + " exists=" + mFile.exists() + " readable="
+						+ mFile.canRead() + " backup=" + mBackupFile.exists());
 
-		Map map = null;
-		long lastModified = 0;
-		long fileSize = 0;
-		if (mFile.canRead()) {
-			lastModified = mFile.lastModified();
-			fileSize = mFile.length();
-			BufferedInputStream str = null;
-			try {
-				str = new BufferedInputStream(new FileInputStream(mFile), 16 * 1024);
-				map = XmlUtils.readMapXml(str);
-				str.close();
-			} catch (XmlPullParserException e) {
-				Log.w(TAG, "getSharedPreferences", e);
-			} catch (IOException e) {
-				Log.w(TAG, "getSharedPreferences", e);
-			} finally {
-				if (str != null) {
-					try {
-						str.close();
-					} catch (RuntimeException rethrown) {
-						throw rethrown;
-					} catch (Exception ignored) {
+			// Read file if possible
+			if (mFile.exists() && mFile.canRead() && !mBackupFile.exists()) {
+				Map map = null;
+				long lastModified = mFile.lastModified();
+				long fileSize = mFile.length();
+				BufferedInputStream str = null;
+				try {
+					str = new BufferedInputStream(new FileInputStream(mFile), 16 * 1024);
+					map = XmlUtils.readMapXml(str);
+				} catch (Throwable ex) {
+					Util.log(null, Log.WARN, "Error reading " + mFile + ": " + ex);
+				} finally {
+					if (str != null) {
+						try {
+							str.close();
+						} catch (RuntimeException rethrown) {
+							throw rethrown;
+						} catch (Throwable ex) {
+							Util.log(null, Log.WARN, "Error closing " + mFile + ": " + ex);
+						}
 					}
 				}
+				if (map != null) {
+					mLoaded = true;
+					mMap = map;
+					mLastModified = lastModified;
+					mFileSize = fileSize;
+					notifyAll();
+				}
 			}
+
+			// Wait for next try
+			if (!mLoaded && tries < cTryMaxCount)
+				try {
+					Thread.sleep(cTryWaitMs);
+				} catch (Throwable ex) {
+					Util.bug(null, ex);
+				}
 		}
-		mLoaded = true;
-		if (map != null) {
-			mMap = map;
-			mLastModified = lastModified;
-			mFileSize = fileSize;
-		} else {
+
+		// File not read
+		if (!mLoaded) {
+			if (tries >= cTryMaxCount)
+				// Not loaded: try to load again on next access
+				Util.log(null, Log.ERROR, "Not loaded " + mFile);
+			else
+				mLoaded = true;
 			mMap = new HashMap<String, Object>();
+			notifyAll();
 		}
-		notifyAll();
+	}
+
+	private static File makeBackupFile(File prefsFile) {
+		return new File(prefsFile.getPath() + ".bak");
 	}
 
 	/**
@@ -114,23 +135,23 @@ public final class SharedPreferencesEx implements SharedPreferences {
 	}
 
 	private boolean hasFileChanged() {
-		if (!mFile.canRead()) {
+		// canRead returns false for non existing files
+		if (!mFile.canRead() || mBackupFile.exists())
 			return true;
-		}
+
 		long lastModified = mFile.lastModified();
 		long fileSize = mFile.length();
 		synchronized (this) {
-			return mLastModified != lastModified || mFileSize != fileSize;
+			return (mLastModified != lastModified || mFileSize != fileSize);
 		}
 	}
 
 	private void awaitLoadedLocked() {
-		while (!mLoaded) {
+		while (!mLoaded)
 			try {
 				wait();
 			} catch (InterruptedException unused) {
 			}
-		}
 	}
 
 	@Override
@@ -218,5 +239,4 @@ public final class SharedPreferencesEx implements SharedPreferences {
 	public void unregisterOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener listener) {
 		throw new UnsupportedOperationException("listeners are not supported in this implementation");
 	}
-
 }

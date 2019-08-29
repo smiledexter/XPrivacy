@@ -6,140 +6,170 @@ import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.support.v4.app.NotificationCompat;
+import android.util.Log;
 
 public class PackageChange extends BroadcastReceiver {
-
 	@Override
-	public void onReceive(Context context, Intent intent) {
-		// Check uri
-		Uri inputUri = Uri.parse(intent.getDataString());
-		if (inputUri.getScheme().equals("package")) {
-			// Get data
-			String packageName = inputUri.getSchemeSpecificPart();
-			int uid = intent.getIntExtra(Intent.EXTRA_UID, 0);
-			boolean replacing = intent.getBooleanExtra(Intent.EXTRA_REPLACING, false);
-			boolean fSystem = PrivacyManager.getSettingBool(null, context, PrivacyManager.cSettingFSystem, true, false);
-			NotificationManager notificationManager = (NotificationManager) context
-					.getSystemService(Context.NOTIFICATION_SERVICE);
+	public void onReceive(final Context context, Intent intent) {
+		try {
+			// Check uri
+			Uri inputUri = intent.getData();
+			if (inputUri.getScheme().equals("package")) {
+				// Get data
+				int uid = intent.getIntExtra(Intent.EXTRA_UID, 0);
+				int userId = Util.getUserId(uid);
+				boolean replacing = intent.getBooleanExtra(Intent.EXTRA_REPLACING, false);
+				boolean ondemand = PrivacyManager.getSettingBool(userId, PrivacyManager.cSettingOnDemand, true);
+				NotificationManager notificationManager = (NotificationManager) context
+						.getSystemService(Context.NOTIFICATION_SERVICE);
 
-			if (intent.getAction().equals(Intent.ACTION_PACKAGE_ADDED)) {
-				// Package added
-				boolean system = false;
-				PackageInfo pInfo = null;
-				PackageManager pm = context.getPackageManager();
-				try {
-					pInfo = pm.getPackageInfo(packageName, 0);
-					system = (pInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
-				} catch (Throwable ex) {
-					Util.bug(null, ex);
-					return;
-				}
+				Util.log(null, Log.WARN, "Package change action=" + intent.getAction() + " replacing=" + replacing
+						+ " uid=" + uid);
 
-				if (fSystem ? !system : true) {
+				// Check action
+				if (intent.getAction().equals(Intent.ACTION_PACKAGE_ADDED)) {
+					// Check privacy service
+					if (PrivacyService.getClient() == null)
+						return;
+
+					// Get data
+					ApplicationInfoEx appInfo = new ApplicationInfoEx(context, uid);
+					String packageName = inputUri.getSchemeSpecificPart();
+
 					// Default deny new user apps
-					if (!system && !replacing) {
-						// Check for existing restrictions
-						boolean someRestricted = false;
-						for (boolean restricted : PrivacyManager.getRestricted(context, uid, false))
-							if (restricted) {
-								someRestricted = true;
-								break;
-							}
+					if (appInfo.getPackageName().size() == 1) {
+						if (replacing)
+							PrivacyManager.clearPermissionCache(uid);
+						else {
+							// Delete existing restrictions
+							PrivacyManager.deleteRestrictions(uid, null, true);
+							PrivacyManager.deleteSettings(uid);
+							PrivacyManager.deleteUsage(uid);
+							PrivacyManager.clearPermissionCache(uid);
 
-						// Restrict if no previous restrictions
-						if (!someRestricted)
-							for (String restrictionName : PrivacyManager.getRestrictions(false))
-								if (PrivacyManager.getSettingBool(null, context,
-										String.format("Template.%s", restrictionName), true, false))
-									PrivacyManager.setRestricted(null, context, uid, restrictionName, null, true);
-					}
+							// Apply template
+							PrivacyManager.applyTemplate(uid, Meta.cTypeTemplate, null, true, true, false);
 
-					// Build result intent
-					Intent resultIntent = new Intent(context, ActivityApp.class);
-					resultIntent.putExtra(ActivityApp.cNotified, true);
-					resultIntent.putExtra(ActivityApp.cPackageName, packageName);
-					resultIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION
-							| Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
-
-					// Build pending intent
-					PendingIntent pendingIntent = PendingIntent.getActivity(context, uid, resultIntent,
-							PendingIntent.FLAG_UPDATE_CURRENT);
-
-					// Title
-					String title = String.format("%s %s", pm.getApplicationLabel(pInfo.applicationInfo),
-							pInfo.versionName);
-
-					// Build notification
-					NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context);
-					notificationBuilder.setSmallIcon(R.drawable.ic_launcher);
-					notificationBuilder.setContentTitle(context.getString(R.string.app_name));
-					notificationBuilder.setContentText(title);
-					notificationBuilder.setContentIntent(pendingIntent);
-					notificationBuilder.setWhen(System.currentTimeMillis());
-					notificationBuilder.setAutoCancel(true);
-					Notification notification = notificationBuilder.build();
-
-					// Notify
-					notificationManager.notify(pInfo.applicationInfo.uid, notification);
-				}
-			} else if (intent.getAction().equals(Intent.ACTION_PACKAGE_REPLACED)) {
-				// Notify reboot required
-				if (packageName.equals(context.getPackageName())) {
-					// Build notification
-					NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context);
-					notificationBuilder.setSmallIcon(R.drawable.ic_launcher);
-					notificationBuilder.setContentTitle(context.getString(R.string.app_name));
-					notificationBuilder.setContentText(context.getString(R.string.msg_reboot));
-					notificationBuilder.setWhen(System.currentTimeMillis());
-					notificationBuilder.setAutoCancel(true);
-					Notification notification = notificationBuilder.build();
-
-					// Notify
-					notificationManager.notify(0, notification);
-				}
-
-				// Upgrade
-				try {
-					// Get stored version
-					PackageManager pm = context.getPackageManager();
-					Version sVersion = new Version(PrivacyManager.getSetting(null, context,
-							PrivacyManager.cSettingVersion, "0.0", false));
-
-					// Version 1.7+
-					if (sVersion.compareTo(new Version("1.7")) < 0) {
-						// Disable identification/proc
-						for (ApplicationInfo aInfo : pm.getInstalledApplications(0))
-							PrivacyManager.setRestricted(null, context, aInfo.uid, PrivacyManager.cIdentification,
-									"/proc", false);
-					}
-
-					// Version 1.7.4+
-					if (sVersion.compareTo(new Version("1.7.4")) < 0) {
-						// Disable location/getProviders,isProviderEnabled
-						for (ApplicationInfo aInfo : pm.getInstalledApplications(0)) {
-							PrivacyManager.setRestricted(null, context, aInfo.uid, PrivacyManager.cLocation,
-									"getProviders", false);
-							PrivacyManager.setRestricted(null, context, aInfo.uid, PrivacyManager.cLocation,
-									"isProviderEnabled", false);
+							// Enable on demand
+							if (ondemand)
+								PrivacyManager.setSetting(uid, PrivacyManager.cSettingOnDemand, Boolean.toString(true));
 						}
 					}
 
-					// Update stored version
-					PackageInfo pInfo = pm.getPackageInfo(context.getPackageName(), 0);
-					PrivacyManager.setSetting(null, context, PrivacyManager.cSettingVersion, pInfo.versionName);
-				} catch (Throwable ex) {
-					Util.bug(null, ex);
-				}
+					// Mark as new/changed
+					PrivacyManager.setSetting(uid, PrivacyManager.cSettingState,
+							Integer.toString(ApplicationInfoEx.STATE_ATTENTION));
 
-			} else if (intent.getAction().equals(Intent.ACTION_PACKAGE_REMOVED) && !replacing) {
-				// Package removed
-				notificationManager.cancel(uid);
+					// New/update notification
+					boolean notify = PrivacyManager.getSettingBool(userId, PrivacyManager.cSettingNotify, true);
+					if (notify)
+						notify = PrivacyManager.getSettingBool(-uid, PrivacyManager.cSettingNotify, true);
+					if (!replacing || notify) {
+						Intent resultIntent = new Intent(context, ActivityApp.class);
+						resultIntent.putExtra(ActivityApp.cUid, uid);
+
+						// Build pending intent
+						PendingIntent pendingIntent = PendingIntent.getActivity(context, uid, resultIntent,
+								PendingIntent.FLAG_UPDATE_CURRENT);
+
+						// Build result intent settings
+						Intent resultIntentSettings = new Intent(context, ActivityApp.class);
+						resultIntentSettings.putExtra(ActivityApp.cUid, uid);
+						resultIntentSettings.putExtra(ActivityApp.cAction, ActivityApp.cActionSettings);
+
+						// Build pending intent settings
+						PendingIntent pendingIntentSettings = PendingIntent.getActivity(context, uid - 10000,
+								resultIntentSettings, PendingIntent.FLAG_UPDATE_CURRENT);
+
+						// Build result intent clear
+						Intent resultIntentClear = new Intent(context, ActivityApp.class);
+						resultIntentClear.putExtra(ActivityApp.cUid, uid);
+						resultIntentClear.putExtra(ActivityApp.cAction, ActivityApp.cActionClear);
+
+						// Build pending intent clear
+						PendingIntent pendingIntentClear = PendingIntent.getActivity(context, uid + 10000,
+								resultIntentClear, PendingIntent.FLAG_UPDATE_CURRENT);
+
+						// Title
+						String title = String.format("%s %s %s",
+								context.getString(replacing ? R.string.msg_update : R.string.msg_new),
+								appInfo.getApplicationName(packageName),
+								appInfo.getPackageVersionName(context, packageName));
+						if (!replacing)
+							title = String.format("%s %s", title, context.getString(R.string.msg_applied));
+
+						// Build notification
+						NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context);
+						notificationBuilder.setSmallIcon(R.drawable.ic_launcher);
+						notificationBuilder.setContentTitle(context.getString(R.string.app_name));
+						notificationBuilder.setContentText(title);
+						notificationBuilder.setContentIntent(pendingIntent);
+						notificationBuilder.setWhen(System.currentTimeMillis());
+						notificationBuilder.setAutoCancel(true);
+
+						// Actions
+						notificationBuilder.addAction(android.R.drawable.ic_menu_edit,
+								context.getString(R.string.menu_app_settings), pendingIntentSettings);
+						notificationBuilder.addAction(android.R.drawable.ic_menu_delete,
+								context.getString(R.string.menu_clear), pendingIntentClear);
+
+						// Notify
+						Notification notification = notificationBuilder.build();
+						notificationManager.notify(appInfo.getUid(), notification);
+					}
+
+				} else if (intent.getAction().equals(Intent.ACTION_PACKAGE_REMOVED)) {
+					// Check privacy service
+					if (PrivacyService.getClient() == null)
+						return;
+
+					if (!replacing) {
+						// Package removed
+						notificationManager.cancel(uid);
+
+						// Delete restrictions
+						ApplicationInfoEx appInfo = new ApplicationInfoEx(context, uid);
+						if (appInfo.getPackageName().size() == 0) {
+							PrivacyManager.deleteRestrictions(uid, null, false);
+							PrivacyManager.deleteSettings(uid);
+							PrivacyManager.deleteUsage(uid);
+							PrivacyManager.clearPermissionCache(uid);
+						}
+					}
+
+				} else if (intent.getAction().equals(Intent.ACTION_PACKAGE_REPLACED)) {
+					// Notify reboot required
+					String packageName = inputUri.getSchemeSpecificPart();
+					if (packageName.equals(context.getPackageName())) {
+						// Mark self as new/changed
+						if (PrivacyService.getClient() != null)
+							PrivacyManager.setSetting(uid, PrivacyManager.cSettingState,
+									Integer.toString(ApplicationInfoEx.STATE_ATTENTION));
+
+						// Start package update
+						Intent changeIntent = new Intent();
+						changeIntent.setClass(context, UpdateService.class);
+						changeIntent.putExtra(UpdateService.cAction, UpdateService.cActionUpdated);
+						context.startService(changeIntent);
+
+						// Build notification
+						NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context);
+						notificationBuilder.setSmallIcon(R.drawable.ic_launcher);
+						notificationBuilder.setContentTitle(context.getString(R.string.app_name));
+						notificationBuilder.setContentText(context.getString(R.string.msg_reboot));
+						notificationBuilder.setWhen(System.currentTimeMillis());
+						notificationBuilder.setAutoCancel(true);
+						Notification notification = notificationBuilder.build();
+
+						// Notify
+						notificationManager.notify(Util.NOTIFY_RESTART, notification);
+					}
+				}
 			}
+		} catch (Throwable ex) {
+			Util.bug(null, ex);
 		}
 	}
 }
